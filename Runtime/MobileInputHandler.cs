@@ -1,72 +1,97 @@
 using UnityEngine;
 using UnityEngine.Events;
+using System;
 
 namespace Five.InputHandlers
 {
     public class MobileInputHandler : MonoBehaviour
     {
+        public enum SwipeDirection { Up, Down, Left, Right }
+
+        [Header("Swipe Settings")]
+        [SerializeField] private float minSwipeDistance = 5f;
+        [SerializeField] private float cooldownBetweenSwipes = 0.5f;
+
+        // State variables
         private bool touchBegan;
-
         private int fingerId;
-        private Vector3 initialScreenPosition;
+        private Vector3 initialSwipePosition;
+        private Vector3 currentSwipePosition;
+        private float touchStartTime;
+        private float lastSwipeTime;
+        private bool isSwipeReady = true;
         private Camera cameraInput;
+        private bool isInCooldown;
+        private bool swipeDetectedThisTouch;
 
-        public bool Interactable { get; set; }
-        public bool IsTouching => touchBegan;
+        // Events
         public UnityEvent TouchBegan { get; } = new();
         public UnityEvent TouchEnded { get; } = new();
-        public UnityEvent<Collider2D> TouchHitCollider { get; } = new();
+        public UnityEvent<Collider> TouchHitCollider { get; } = new();
+        public UnityEvent<SwipeDirection> SwipeDetected { get; } = new();
 
-        private Camera CameraInput
-        {
-            get
-            {
-                if (cameraInput == null)
-                {
-                    cameraInput = Camera.main;
-                }
+        public Func<bool> IsPointerOverUI;
+        public bool Interactable { get; set; } = true;
+        public bool IsTouching => touchBegan;
+        public Vector2 SwipeDelta => touchBegan ? currentSwipePosition - initialSwipePosition : Vector2.zero;
+        public bool IsSwipeReady => isSwipeReady;
 
-                return cameraInput;
-            }
-        }
+        private Camera CameraInput => cameraInput != null ? cameraInput : (cameraInput = Camera.main);
 
         private void Update()
         {
             if (!Interactable) return;
 
-            var touchStart = false;
-            var touchEnded = false;
-            var inputPosition = new Vector3();
-
-            if (Input.touchCount > 0)
+            if (isInCooldown && Time.time - lastSwipeTime >= cooldownBetweenSwipes)
             {
-                Touch? touch = null;
-                if (!touchBegan)
+                isInCooldown = false;
+                isSwipeReady = true;
+                if (touchBegan)
                 {
-                    for (int i = 0; i < Input.touchCount; i++)
-                    {
-                        if (Input.touches[i].phase == TouchPhase.Began)
-                        {
-                            touchBegan = true;
-                            touch = Input.touches[i];
-                            fingerId = touch.Value.fingerId;
-                            TouchBegan.Invoke();
-                            break;
-                        }
-                    }
-
-                    if (touch.HasValue && touchBegan)
-                        initialScreenPosition = touch.Value.position;
+                    initialSwipePosition = currentSwipePosition;
                 }
-                else
+            }
+
+            HandleTouchInput();
+            HandleMouseInput();
+        }
+
+        private void HandleTouchInput()
+        {
+            if (Input.touchCount == 0) return;
+
+            bool touchStart = false;
+            bool touchEnded = false;
+
+            Touch? touch = null;
+
+            if (!touchBegan)
+            {
+                for (int i = 0; i < Input.touchCount; i++)
                 {
-                    for (int i = 0; i < Input.touchCount; i++)
+                    if (Input.touches[i].phase == TouchPhase.Began)
                     {
-                        if (Input.touches[i].fingerId == fingerId)
+                        touch = Input.touches[i];
+                        StartNewTouch(touch.Value);
+                        touchStart = true;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                for (int i = 0; i < Input.touchCount; i++)
+                {
+                    if (Input.touches[i].fingerId == fingerId)
+                    {
+                        touch = Input.touches[i];
+                        UpdateTouchPosition(touch.Value.position);
+
+                        if (touch.Value.phase == TouchPhase.Moved && isSwipeReady && !swipeDetectedThisTouch)
                         {
-                            touch = Input.touches[i];
-                            break;
+                            CheckForContinuousSwipe();
                         }
+                        break;
                     }
                 }
 
@@ -76,55 +101,127 @@ namespace Five.InputHandlers
                 }
                 else
                 {
-                    touchStart = touch.Value.phase == TouchPhase.Began;
-                    touchEnded = touch.Value.phase == TouchPhase.Ended;
-                    inputPosition = CameraInput.ScreenToWorldPoint(touch.Value.position);
-
-                    if (touchEnded)
-                        touchBegan = false;
+                    touchEnded = touch.Value.phase == TouchPhase.Ended ||
+                                touch.Value.phase == TouchPhase.Canceled;
                 }
             }
-            else
+
+            ProcessTouchEvents(touchStart, touchEnded);
+        }
+
+        private void HandleMouseInput()
+        {
+            if (Input.touchCount > 0) return;
+
+            if (!touchBegan && Input.GetMouseButtonDown(0))
             {
-                //make the mouse logic is the same as the touch system logic above
-                if (!touchBegan)
-                {
-                    if (Input.GetMouseButtonDown(0))
-                    {
-                        touchBegan = true;
-                        TouchBegan.Invoke();
-                    }
-
-                    if (touchBegan)
-                        initialScreenPosition = Input.mousePosition;
-                }
-
-                if (touchBegan)
-                {
-                    touchStart = Input.GetMouseButtonDown(0);
-                    touchEnded = Input.GetMouseButtonUp(0);
-                    inputPosition = CameraInput.ScreenToWorldPoint(Input.mousePosition);
-
-                    if (touchEnded)
-                        touchBegan = false;
-                }
+                StartNewTouch(Input.mousePosition);
+                ProcessTouchEvents(true, false);
             }
 
+            if (touchBegan)
+            {
+                UpdateTouchPosition(Input.mousePosition);
+
+                if (Input.GetMouseButton(0) && isSwipeReady && !swipeDetectedThisTouch)
+                {
+                    CheckForContinuousSwipe();
+                }
+
+                if (Input.GetMouseButtonUp(0))
+                {
+                    ProcessTouchEvents(false, true);
+                }
+            }
+        }
+
+        private void StartNewTouch(Touch touch)
+        {
+            touchBegan = true;
+            fingerId = touch.fingerId;
+            initialSwipePosition = touch.position;
+            currentSwipePosition = initialSwipePosition;
+            touchStartTime = Time.time;
+            swipeDetectedThisTouch = false;
+            TouchBegan.Invoke();
+        }
+
+        private void StartNewTouch(Vector3 position)
+        {
+            touchBegan = true;
+            fingerId = -1;
+            initialSwipePosition = position;
+            currentSwipePosition = initialSwipePosition;
+            touchStartTime = Time.time;
+            swipeDetectedThisTouch = false;
+            TouchBegan.Invoke();
+        }
+
+        private void UpdateTouchPosition(Vector3 newPosition)
+        {
+            currentSwipePosition = newPosition;
+        }
+
+        private void ProcessTouchEvents(bool touchStart, bool touchEnded)
+        {
             if (touchStart)
             {
-                var hit = Physics2D.Raycast(inputPosition, Vector2.zero);
-                if (hit.collider != null)
+                if (IsPointerOverUI == null || !IsPointerOverUI())
                 {
-                    TouchHitCollider.Invoke(hit.collider);
+                    CheckForColliderHit();
                 }
             }
-
 
             if (touchEnded)
             {
+                swipeDetectedThisTouch = false;
                 touchBegan = false;
                 TouchEnded.Invoke();
             }
+        }
+
+        private void CheckForColliderHit()
+        {
+            Ray ray = CameraInput.ScreenPointToRay(currentSwipePosition);
+            if (Physics.Raycast(ray, out RaycastHit hit))
+            {
+                TouchHitCollider.Invoke(hit.collider);
+            }
+        }
+
+        private void CheckForContinuousSwipe()
+        {
+            if (isInCooldown || swipeDetectedThisTouch) return;
+
+            Vector2 swipeDelta = currentSwipePosition - initialSwipePosition;
+
+            if (swipeDelta.magnitude >= minSwipeDistance)
+            {
+                ProcessSwipe(swipeDelta);
+                StartCooldown();
+                swipeDetectedThisTouch = true;
+            }
+        }
+
+        private void ProcessSwipe(Vector2 swipeDelta)
+        {
+            swipeDelta.Normalize();
+
+            if (Mathf.Abs(swipeDelta.y) > Mathf.Abs(swipeDelta.x))
+            {
+                SwipeDetected.Invoke(swipeDelta.y > 0 ? SwipeDirection.Up : SwipeDirection.Down);
+            }
+            else
+            {
+                SwipeDetected.Invoke(swipeDelta.x > 0 ? SwipeDirection.Right : SwipeDirection.Left);
+            }
+        }
+
+        private void StartCooldown()
+        {
+            isSwipeReady = false;
+            isInCooldown = true;
+            lastSwipeTime = Time.time;
         }
 
         public void SetCameraInput(Camera targetCamera)
