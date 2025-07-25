@@ -1,6 +1,6 @@
 {
 	"name": "com.game5mobile.mobileinputhandler",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"displayName": "Five - Mobile Input Handler",
 	"description": "Provide event for mobile input",
 	"unity": "2021.3",
